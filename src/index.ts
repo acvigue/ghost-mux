@@ -95,10 +95,10 @@ class MuxStorage extends StorageBase {
   }
 
   async save(image: Image, targetDir?: string) {
-    if (!targetDir || image.type.indexOf('video/') !== 0) {
+    if (image.type.indexOf('video/') !== 0) {
       //return original assetID
       const assetID = image.name.split('_').shift()
-      return `https://vigue.me/api/muxManifest/${assetID}`
+      return `https://vigue.me/api/muxThumbnail/${assetID}`
     }
 
     const file = createReadStream(image.path)
