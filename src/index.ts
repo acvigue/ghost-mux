@@ -1,10 +1,7 @@
 import Mux from '@mux/mux-node';
-import got from 'got';
 import StorageBase, { type ReadOptions, type Image } from 'ghost-storage-base'
-import { join } from 'path'
 import { createReadStream } from 'fs'
-import type { Readable } from 'stream'
-import type { Handler } from 'express'
+import { request, type Handler } from 'express'
 
 const stripLeadingSlash = (s: string) =>
   s.indexOf('/') === 0 ? s.substring(1) : s
@@ -18,6 +15,39 @@ type Config = {
   tokenSecret?: string
   encodingTier?: EncodingTier
 }
+
+const videoThumbnailMap = {}
+
+
+async function* nodeStreamToIterator(stream) {
+  for await (const chunk of stream) {
+    yield chunk;
+  }
+}
+
+/**
+ * Taken from Next.js doc
+ * https://nextjs.org/docs/app/building-your-application/routing/router-handlers#streaming
+ * Itself taken from mozilla doc
+ * https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream#convert_async_iterator_to_stream
+ * @param {*} iterator 
+ * @returns {ReadableStream}
+ */
+function iteratorToStream(iterator) {
+  return new ReadableStream({
+    async pull(controller) {
+      const { value, done } = await iterator.next()
+
+      if (done) {
+        controller.close()
+      } else {
+
+        controller.enqueue(new Uint8Array(value))
+      }
+    },
+  })
+}
+
 
 class MuxStorage extends StorageBase {
   tokenId?: string
@@ -65,6 +95,12 @@ class MuxStorage extends StorageBase {
   }
 
   async save(image: Image, targetDir?: string) {
+    if (!targetDir || image.type.indexOf('video/') !== 0) {
+      //return original assetID
+      const assetID = image.name.split('_').shift()
+      return `https://vigue.me/api/muxManifest/${assetID}`
+    }
+
     const file = createReadStream(image.path)
 
     const mux = this.mux()
@@ -77,13 +113,30 @@ class MuxStorage extends StorageBase {
       }
     })
 
-    //then PUT the file to the upload URL
-    await got.put(upload.url, {
-      body: file
+    console.log(`Upload ${upload.id} created: ${upload.url}`)
+
+    const iterator = nodeStreamToIterator(file)
+    const webStream = iteratorToStream(iterator)
+
+    //put the file into the upload
+    const response = await fetch(upload.url, {
+      method: 'PUT',
+      body: webStream,
+      headers: {
+        'Content-Type': image.type
+      },
+      //@ts-expect-error
+      duplex: "half"
     })
+
+    console.log(response.status)
+
+    console.log(`Upload ${upload.id} completed`)
 
     const result = await mux.video.uploads.retrieve(upload.id);
     const assetID = result.asset_id;
+
+    console.log(`Asset ID: ${assetID}`)
 
     if (!assetID) {
       throw new Error('No asset ID found')
