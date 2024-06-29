@@ -98,7 +98,7 @@ class MuxStorage extends StorageBase {
     if (image.type.indexOf('video/') !== 0) {
       //return original assetID
       const assetID = image.name.split('_').shift()
-      return `https://vigue.me/api/muxThumbnail/${assetID}`
+      return `https://vigue.me/api/vod/thumbnail/${assetID}`
     }
 
     const file = createReadStream(image.path)
@@ -112,8 +112,6 @@ class MuxStorage extends StorageBase {
         encoding_tier: this.encodingTier
       }
     })
-
-    console.log(`Upload ${upload.id} created: ${upload.url}`)
 
     const iterator = nodeStreamToIterator(file)
     const webStream = iteratorToStream(iterator)
@@ -129,20 +127,14 @@ class MuxStorage extends StorageBase {
       duplex: "half"
     })
 
-    console.log(response.status)
-
-    console.log(`Upload ${upload.id} completed`)
-
     const result = await mux.video.uploads.retrieve(upload.id);
     const assetID = result.asset_id;
-
-    console.log(`Asset ID: ${assetID}`)
 
     if (!assetID) {
       throw new Error('No asset ID found')
     }
 
-    return `https://vigue.me/api/muxManifest/${assetID}`;
+    return `https://vigue.me/api/vod/hls/${assetID}`;
   }
 
   serve(): Handler {
