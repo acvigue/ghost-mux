@@ -1,9 +1,5 @@
-import {
-  type PutObjectCommandInput,
-  type S3ClientConfig,
-  type ObjectCannedACL,
-  S3,
-} from '@aws-sdk/client-s3'
+import Mux from '@mux/mux-node';
+import got from 'got';
 import StorageBase, { type ReadOptions, type Image } from 'ghost-storage-base'
 import { join } from 'path'
 import { createReadStream } from 'fs'
@@ -15,132 +11,50 @@ const stripLeadingSlash = (s: string) =>
 const stripEndingSlash = (s: string) =>
   s.indexOf('/') === s.length - 1 ? s.substring(0, s.length - 1) : s
 
+type EncodingTier = 'baseline' | 'smart'
+
 type Config = {
-  accessKeyId?: string
-  assetHost?: string
-  bucket?: string
-  pathPrefix?: string
-  region?: string
-  secretAccessKey?: string
-  endpoint?: string
-  forcePathStyle?: boolean
-  acl?: string
+  tokenId?: string
+  tokenSecret?: string
+  encodingTier?: EncodingTier
 }
 
-class S3Storage extends StorageBase {
-  accessKeyId?: string
-  secretAccessKey?: string
-  region?: string
-  bucket?: string
-  host: string
-  pathPrefix: string
-  endpoint: string
-  forcePathStyle: boolean
-  acl?: ObjectCannedACL
+class MuxStorage extends StorageBase {
+  tokenId?: string
+  tokenSecret?: string
+  encodingTier?: EncodingTier
 
   constructor(config: Config = {}) {
     super()
 
     const {
-      accessKeyId,
-      assetHost,
-      bucket,
-      pathPrefix,
-      region,
-      secretAccessKey,
-      endpoint,
-      forcePathStyle,
-      acl,
+      tokenId,
+      tokenSecret,
+      encodingTier = 'smart',
     } = config
 
     // Compatible with the aws-sdk's default environment variables
-    this.accessKeyId = accessKeyId
-    this.secretAccessKey = secretAccessKey
-    this.region = process.env.AWS_DEFAULT_REGION || region
+    this.tokenId = tokenId
+    this.tokenSecret = tokenSecret
+    this.encodingTier = process.env.ENCODING_TIER as EncodingTier || encodingTier
 
-    this.bucket = process.env.GHOST_STORAGE_ADAPTER_S3_PATH_BUCKET || bucket
-
-    if (!this.bucket) throw new Error('S3 bucket not specified')
-
-    // Optional configurations
-    this.forcePathStyle =
-      Boolean(process.env.GHOST_STORAGE_ADAPTER_S3_FORCE_PATH_STYLE) ||
-      Boolean(forcePathStyle) ||
-      false
-
-    let defaultHost: string
-
-    if (this.forcePathStyle) {
-      defaultHost = `https://s3${
-        this.region === 'us-east-1' ? '' : `.${this.region}`
-      }.amazonaws.com/${this.bucket}`
-    } else {
-      defaultHost = `https://${this.bucket}.s3${
-        this.region === 'us-east-1' ? '' : `.${this.region}`
-      }.amazonaws.com`
-    }
-
-    this.host =
-      process.env.GHOST_STORAGE_ADAPTER_S3_ASSET_HOST ||
-      assetHost ||
-      defaultHost
-
-    this.pathPrefix = stripLeadingSlash(
-      process.env.GHOST_STORAGE_ADAPTER_S3_PATH_PREFIX || pathPrefix || ''
-    )
-    this.endpoint =
-      process.env.GHOST_STORAGE_ADAPTER_S3_ENDPOINT || endpoint || ''
-    this.acl = (process.env.GHOST_STORAGE_ADAPTER_S3_ACL ||
-      acl ||
-      'public-read') as ObjectCannedACL
+    if (!this.tokenId) throw new Error('No Mux Token ID provided')
+    if (!this.tokenSecret) throw new Error('No Mux Token Secret provided')
   }
 
   async delete(fileName: string, targetDir?: string) {
-    const directory = targetDir || this.getTargetDir(this.pathPrefix)
-
-    try {
-      await this.s3().deleteObject({
-        Bucket: this.bucket,
-        Key: stripLeadingSlash(join(directory, fileName)),
-      })
-    } catch {
-      return false
-    }
-    return true
+    return true;
   }
 
   async exists(fileName: string, targetDir?: string) {
-    try {
-      await this.s3().getObject({
-        Bucket: this.bucket,
-        Key: stripLeadingSlash(
-          targetDir ? join(targetDir, fileName) : fileName
-        ),
-      })
-    } catch {
-      return false
-    }
-    return true
+    return false;
   }
 
-  s3() {
-    const options: S3ClientConfig = {
-      region: this.region,
-      forcePathStyle: this.forcePathStyle,
-    }
-
-    // Set credentials only if provided, falls back to AWS SDK's default provider chain
-    if (this.accessKeyId && this.secretAccessKey) {
-      options.credentials = {
-        accessKeyId: this.accessKeyId,
-        secretAccessKey: this.secretAccessKey,
-      }
-    }
-
-    if (this.endpoint !== '') {
-      options.endpoint = this.endpoint
-    }
-    return new S3(options)
+  mux() {
+    return new Mux({
+      tokenId: this.tokenId,
+      tokenSecret: this.tokenSecret
+    });
   }
 
   // Doesn't seem to be documented, but required for using this adapter for other media file types.
@@ -151,79 +65,43 @@ class S3Storage extends StorageBase {
   }
 
   async save(image: Image, targetDir?: string) {
-    const directory = targetDir || this.getTargetDir(this.pathPrefix)
-
-    const fileName = await this.getUniqueFileName(image, directory)
     const file = createReadStream(image.path)
 
-    let config: PutObjectCommandInput = {
-      ACL: this.acl,
-      Body: file,
-      Bucket: this.bucket,
-      CacheControl: `max-age=${30 * 24 * 60 * 60}`,
-      ContentType: image.type,
-      Key: stripLeadingSlash(fileName),
-    }
-    await this.s3().putObject(config)
+    const mux = this.mux()
 
-    return `${this.host}/${stripLeadingSlash(fileName)}`
+    const upload = await mux.video.uploads.create({
+      cors_origin: 'https://cms.vigue.me',
+      new_asset_settings: {
+        playback_policy: ['public'],
+        encoding_tier: this.encodingTier
+      }
+    })
+
+    //then PUT the file to the upload URL
+    await got.put(upload.url, {
+      body: file
+    })
+
+    const result = await mux.video.uploads.retrieve(upload.id);
+    const assetID = result.asset_id;
+
+    if (!assetID) {
+      throw new Error('No asset ID found')
+    }
+
+    return `https://vigue.me/api/muxManifest/${assetID}`;
   }
 
   serve(): Handler {
     return async (req, res, next) => {
-      try {
-        const output = await this.s3().getObject({
-          Bucket: this.bucket,
-          Key: stripLeadingSlash(stripEndingSlash(this.pathPrefix) + req.path),
-        })
-
-        const headers: { [key: string]: string } = {}
-        if (output.AcceptRanges) headers['accept-ranges'] = output.AcceptRanges
-        if (output.CacheControl) headers['cache-control'] = output.CacheControl
-        if (output.ContentDisposition)
-          headers['content-disposition'] = output.ContentDisposition
-        if (output.ContentEncoding)
-          headers['content-encoding'] = output.ContentEncoding
-        if (output.ContentLanguage)
-          headers['content-language'] = output.ContentLanguage
-        if (output.ContentLength)
-          headers['content-length'] = `${output.ContentLength}`
-        if (output.ContentRange) headers['content-range'] = output.ContentRange
-        if (output.ContentType) headers['content-type'] = output.ContentType
-        if (output.ETag) headers['etag'] = output.ETag
-        res.set(headers)
-
-        const stream = output.Body as Readable
-        stream.pipe(res)
-      } catch (err) {
-        res.status(404)
-        next(err)
-      }
+      res.status(404)
     }
   }
 
   async read(options: ReadOptions = { path: '' }) {
-    let path = (options.path || '').replace(/\/$|\\$/, '')
-
-    // check if path is stored in s3 handled by us
-    if (!path.startsWith(this.host)) {
-      throw new Error(`${path} is not stored in s3`)
-    }
-    path = path.substring(this.host.length)
-
-    const response = await this.s3().getObject({
-      Bucket: this.bucket,
-      Key: stripLeadingSlash(path),
-    })
-    const stream = response.Body as Readable
-
-    return await new Promise<Buffer>((resolve, reject) => {
-      const chunks: Buffer[] = []
-      stream.on('data', (chunk) => chunks.push(chunk))
-      stream.once('end', () => resolve(Buffer.concat(chunks)))
-      stream.once('error', reject)
-    })
+    throw new Error(`${options.path} not readable`);
+    return Buffer.from('');
   }
 }
 
-export default S3Storage
+export default MuxStorage
